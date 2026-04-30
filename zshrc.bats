@@ -16,7 +16,7 @@ setup() {
 
 teardown() {
   cp "$ZSH_RC_ORIG" "$RC"
-  rm -f "$HOME/.zshrc-hash" "$HOME/.zshrc-hash-remote"
+  rm -f "$HOME/.zshrc-hash" "$HOME/.zshrc-hash-remote" "$RC.zwc" "$HOME/.zshrc.zwc"
 }
 
 # Helper: run a snippet inside a fresh zsh that has sourced the rc in test mode.

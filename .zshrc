@@ -251,6 +251,13 @@ _zshrc_install_gauntlet() {
   fi
   zlog debug "Running install gauntlet"
 
+  # Warn (don't panic) if sudo will need a password later — the real apt-get
+  # calls below will prompt the user. Keeps gauntlet usable on machines
+  # without NOPASSWD sudo configured.
+  if [[ -n $SUDO_CMD ]]; then
+    sudo -n true 2>/dev/null || zlog warn "sudo will prompt for password during install steps"
+  fi
+
   # Collect all missing apt packages and install in one batched apt-get call
   # at the end of this section (one update + one install instead of N).
   local -a needs_apt
@@ -377,9 +384,6 @@ run(){
   else
     SUDO_CMD='sudo'
     zlog debug "Setting SUDO_CMD to 'sudo' (running as non-root with sudo available)"
-  fi
-  if [[ -n $SUDO_CMD ]]; then
-    sudo -n true 2>/dev/null || panic "sudo required but not available non-interactively"
   fi
 
   zshrc_check_for_updates
