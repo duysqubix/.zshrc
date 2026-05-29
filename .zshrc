@@ -305,7 +305,7 @@ _zshrc_install_gauntlet() {
       needs_apt=()
 
       zlog debug "Checking required commands..."
-      typeset -A required_commands=( [git]=git [wget]=wget [ps]=procps [neofetch]=neofetch )
+      typeset -A required_commands=( [git]=git [wget]=wget [ps]=procps )
       for cmd in ${(k)required_commands}; do
         if ! command -v "$cmd" > /dev/null 2>&1; then
           zlog info "Missing command: ${RED}${cmd}${RESET}"
@@ -337,7 +337,7 @@ _zshrc_install_gauntlet() {
       needs_brew=()
 
       zlog debug "Checking required commands..."
-      typeset -A required_commands=( [git]=git [wget]=wget [neofetch]=neofetch )
+      typeset -A required_commands=( [git]=git [wget]=wget [fastfetch]=fastfetch )
       for cmd in ${(k)required_commands}; do
         if ! command_exists "$cmd"; then
           zlog info "Missing command: ${RED}${cmd}${RESET}"
@@ -419,6 +419,25 @@ _zshrc_install_gauntlet() {
           || panic "Unable to install UV"
       else
         zlog debug "UV already installed"
+      fi
+
+      # fastfetch is not in the Debian/Ubuntu apt repos before 25.04, so install
+      # the official prebuilt .deb release (architecture-aware) instead of a PPA.
+      if ! command_exists fastfetch; then
+        local _ff_arch=""
+        case "$(uname -m)" in
+          x86_64|amd64)  _ff_arch=amd64 ;;
+          aarch64|arm64) _ff_arch=aarch64 ;;
+        esac
+        if [[ -n $_ff_arch ]]; then
+          zlog "Installing fastfetch (.deb, $_ff_arch)..."
+          local _ff_deb="/tmp/fastfetch-linux-$_ff_arch.deb"
+          curl -fsSL "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/fastfetch-linux-$_ff_arch.deb" -o "$_ff_deb" \
+            && ${=SUDO_CMD} apt-get install -y "$_ff_deb" \
+            || panic "Unable to install fastfetch from the .deb release"
+        else
+          zlog warn "Unknown architecture $(uname -m); skipping fastfetch install"
+        fi
       fi
       ;;
     macos)
@@ -549,7 +568,7 @@ run(){
   fi
 
   zlog "Zsh configuration loaded successfully"
-  [[ -o interactive && $SHLVL -eq 1 ]] && command_exists neofetch && neofetch -L
+  [[ -o interactive && $SHLVL -eq 1 ]] && command_exists fastfetch && fastfetch
 }
 
 dockerps() {

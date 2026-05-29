@@ -277,15 +277,16 @@ _run_gauntlet() {
 }
 
 # ---------------------------------------------------------------------------
-# S5 — neofetch gated on SHLVL=1 and interactive shell
+# S5 — startup splash gated on SHLVL=1 and interactive shell
 # ---------------------------------------------------------------------------
 
-@test "S5: neofetch is gated on -o interactive and SHLVL=1" {
-  # The bare `neofetch -L` line must be replaced by a guarded call.
-  ! grep -E '^[[:space:]]*neofetch -L[[:space:]]*$' "$RC"
+@test "S5: startup splash is gated on -o interactive and SHLVL=1" {
   run grep -F '[[ -o interactive && $SHLVL -eq 1 ]]' "$RC"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q neofetch
+  # A fetch tool is invoked under that gate.
+  grep -qE 'fastfetch|neofetch' "$RC"
+  # No UNGUARDED top-level fetch line (must sit inside the guard, indented).
+  ! grep -E '^(fastfetch|neofetch)' "$RC"
 }
 
 # ---------------------------------------------------------------------------
@@ -606,4 +607,49 @@ _run_gauntlet_macos() {
   [[ "$output" == *"unsupported"* ]]
   [ ! -f "$sandbox/.zshrc-bootstrapped" ]
   rm -rf "$sandbox"
+}
+
+# ---------------------------------------------------------------------------
+# fastfetch — replaces neofetch on both OSes (brew on macOS, .deb on Linux)
+# ---------------------------------------------------------------------------
+
+@test "fastfetch: neofetch is fully replaced by fastfetch in the rc" {
+  ! grep -F 'neofetch' "$RC"
+  grep -q 'fastfetch' "$RC"
+}
+
+@test "fastfetch: macos installs fastfetch via brew (never neofetch)" {
+  sandbox=$(_run_gauntlet_macos yes "fastfetch")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" fastfetch "* || " $line " == *" fastfetch" ]]
+  ! grep -F 'neofetch' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "fastfetch: linux installs fastfetch from the official .deb release" {
+  sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=linux zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD=''
+    apt-get(){ print -r -- 'CALL:apt-get '\"\$@\" >> \$HOME/calls.log; }
+    curl(){ print -r -- 'CALL:curl '\"\$@\" >> \$HOME/calls.log; return 0; }
+    cargo(){ :; }; brew(){ :; }; git(){ :; }; sh(){ :; }; chmod(){ :; }
+    command_exists() { case \$1 in fastfetch) return 1;; *) return 0;; esac }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  echo 'calls:'; cat "$sandbox/calls.log" 2>/dev/null || true
+  # fetched as a .deb from the fastfetch project, then installed via apt-get
+  grep -E '^CALL:curl .*fastfetch.*\.deb' "$sandbox/calls.log"
+  grep -E '^CALL:apt-get install .*fastfetch.*\.deb' "$sandbox/calls.log"
+  # never via the (missing) apt repo package nor neofetch
+  ! grep -F 'neofetch' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "fastfetch: linux .deb url is architecture-aware" {
+  # The .deb url must select amd64 or aarch64 from uname -m, not hardcode one.
+  awk '/^_zshrc_install_gauntlet\(\)/,/^}/' "$RC" | grep -qE 'uname -m'
+  awk '/^_zshrc_install_gauntlet\(\)/,/^}/' "$RC" | grep -qE 'amd64|aarch64'
 }
