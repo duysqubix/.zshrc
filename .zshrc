@@ -5,7 +5,7 @@
 # This configuration file provides:
 # - Automatic Oh My Zsh installation and configuration
 # - Docker availability checking with optional installation
-# - Remote .zshrc synchronization with GitHub Gist
+# - Remote .zshrc synchronization with the GitHub repo (raw on master)
 # - Essential command installation (git, wget, shfmt, ripgrep, bat, etc.)
 # - Delta (git diff tool) installation for supported architectures
 # - Bat-extras installation for enhanced file viewing
@@ -173,12 +173,14 @@ test_zshrc() {
   fi
 }
 
-_zshrc_gist_url="https://gist.githubusercontent.com/duysqubix/27084d18b99181c60eea9c3d2a321fce/raw/duysqubix-zshrc"
+# Self-update source of truth: the .zshrc tracked in the GitHub repo (raw on the
+# default branch). Update this if the repo/branch ever moves.
+_zshrc_remote_url="https://raw.githubusercontent.com/duysqubix/.zshrc/master/.zshrc"
 
 update_zshrc() {
   zlog debug "Updating .zshrc from remote"
-  curl -s $_zshrc_gist_url -o $HOME/.zshrc \
-    || panic "Unable to read remote .zshrc file in gist"
+  curl -s $_zshrc_remote_url -o $HOME/.zshrc \
+    || panic "Unable to read remote .zshrc from the repo"
   local _fetch_hash=$(_zshrc_sha256 < $HOME/.zshrc)
   print -r -- $_fetch_hash > $HOME/.zshrc-hash-remote
   print -r -- $_fetch_hash > $HOME/.zshrc-hash
@@ -190,7 +192,7 @@ update_zshrc() {
 
 zshrc_diff(){
   zlog debug "Checking diff between local and remote .zshrc"
-  curl -o /tmp/.zshrc-remote $_zshrc_gist_url | zlog || panic "Unable to read remote .zshrc file in gist"
+  curl -o /tmp/.zshrc-remote $_zshrc_remote_url | zlog || panic "Unable to read remote .zshrc from the repo"
 
   if command_exists delta; then
     zlog debug "using 'delta' to find differences"
@@ -205,7 +207,7 @@ zshrc_check_for_updates(){
 
   # Check for .zshrc updates
   zlog debug "Fetching remote .zshrc hash"
-  local remote_hash=$(curl -s $_zshrc_gist_url | _zshrc_sha256)
+  local remote_hash=$(curl -s $_zshrc_remote_url | _zshrc_sha256)
   local local_hash=$(_zshrc_sha256 < $HOME/.zshrc)
 
   if [[ $local_hash != $remote_hash ]]; then

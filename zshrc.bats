@@ -653,3 +653,25 @@ _run_gauntlet_macos() {
   awk '/^_zshrc_install_gauntlet\(\)/,/^}/' "$RC" | grep -qE 'uname -m'
   awk '/^_zshrc_install_gauntlet\(\)/,/^}/' "$RC" | grep -qE 'amd64|aarch64'
 }
+
+# ---------------------------------------------------------------------------
+# repo-sync — self-update pulls from the github repo raw url, not a gist
+# ---------------------------------------------------------------------------
+
+@test "repo-sync: no gist references remain anywhere in the rc" {
+  ! grep -iF 'gist' "$RC"
+}
+
+@test "repo-sync: remote url points at the repo raw .zshrc" {
+  grep -qF 'raw.githubusercontent.com/duysqubix/.zshrc' "$RC"
+  # the legacy gist variable name is gone
+  ! grep -qF '_zshrc_gist_url' "$RC"
+  grep -qF '_zshrc_remote_url' "$RC"
+}
+
+@test "repo-sync: update_zshrc and the update-check use the repo remote" {
+  awk '/^update_zshrc\(\)/,/^}/' "$RC" | grep -q '_zshrc_remote_url'
+  awk '/^zshrc_check_for_updates\(\)/,/^}/' "$RC" | grep -q '_zshrc_remote_url'
+  # the remote variable is defined as the repo's raw .zshrc url
+  grep -qE '^_zshrc_remote_url=.*raw[.]githubusercontent[.]com/duysqubix/[.]zshrc' "$RC"
+}
