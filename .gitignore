@@ -3,3 +3,6 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# OhMyOpenCode agent scratch
+.omo/
