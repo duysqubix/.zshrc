@@ -572,7 +572,8 @@ run(){
   fi
 
   zlog "Zsh configuration loaded successfully"
-  [[ -o interactive && $SHLVL -eq 1 ]] && command_exists fastfetch && fastfetch
+  # Show the fastfetch splash on every interactive shell start.
+  [[ -o interactive ]] && command_exists fastfetch && fastfetch
 }
 
 dockerps() {

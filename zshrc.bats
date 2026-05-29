@@ -277,16 +277,17 @@ _run_gauntlet() {
 }
 
 # ---------------------------------------------------------------------------
-# S5 — startup splash gated on SHLVL=1 and interactive shell
+# S5 — startup splash runs fastfetch on every interactive shell (no SHLVL gate)
 # ---------------------------------------------------------------------------
 
-@test "S5: startup splash is gated on -o interactive and SHLVL=1" {
-  run grep -F '[[ -o interactive && $SHLVL -eq 1 ]]' "$RC"
+@test "S5: startup splash runs fastfetch on every interactive shell" {
+  # The splash guards fastfetch on -o interactive only (no SHLVL restriction).
+  run grep -E '\[\[ -o interactive \]\].*fastfetch' "$RC"
   [ "$status" -eq 0 ]
-  # A fetch tool is invoked under that gate.
-  grep -qE 'fastfetch|neofetch' "$RC"
-  # No UNGUARDED top-level fetch line (must sit inside the guard, indented).
-  ! grep -E '^(fastfetch|neofetch)' "$RC"
+  # That splash line must NOT be gated on SHLVL.
+  ! echo "$output" | grep -q 'SHLVL'
+  # No unguarded bare fastfetch line at top level.
+  ! grep -E '^[[:space:]]*fastfetch[[:space:]]*$' "$RC"
 }
 
 # ---------------------------------------------------------------------------
