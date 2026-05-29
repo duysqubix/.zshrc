@@ -179,8 +179,22 @@ _zshrc_remote_url="https://raw.githubusercontent.com/duysqubix/.zshrc/master/.zs
 
 update_zshrc() {
   zlog debug "Updating .zshrc from remote"
-  curl -s $_zshrc_remote_url -o $HOME/.zshrc \
-    || panic "Unable to read remote .zshrc from the repo"
+  # If ~/.zshrc is a symlink into a git work tree, update by pulling the repo so
+  # the symlink (and your local checkout) stay intact. curl -o would replace the
+  # symlink with a standalone copy and silently revert local commits.
+  if [[ -L $HOME/.zshrc ]]; then
+    local _repo_dir=${"$(readlink $HOME/.zshrc)":h}
+    if git -C $_repo_dir rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+      zlog debug "~/.zshrc -> $_repo_dir; pulling the repo"
+      git -C $_repo_dir pull --ff-only | zlog \
+        || panic "git pull failed in $_repo_dir"
+    else
+      panic "~/.zshrc symlinks to $_repo_dir, which is not a git repo; refusing to clobber the symlink"
+    fi
+  else
+    curl -s $_zshrc_remote_url -o $HOME/.zshrc \
+      || panic "Unable to read remote .zshrc from the repo"
+  fi
   local _fetch_hash=$(_zshrc_sha256 < $HOME/.zshrc)
   print -r -- $_fetch_hash > $HOME/.zshrc-hash-remote
   print -r -- $_fetch_hash > $HOME/.zshrc-hash
@@ -318,6 +332,13 @@ _zshrc_install_gauntlet() {
       if ! command_exists fzf; then
         zlog debug "fzf missing, queuing for apt batch"
         needs_apt+=fzf
+      fi
+
+      # bat/ripgrep are built from source via cargo below, which needs a C
+      # linker (cc). Pull in build-essential in the same apt batch when either
+      # will be compiled and no compiler is present.
+      if ! command_exists bat || ! command_exists rg; then
+        command_exists cc || needs_apt+=build-essential
       fi
 
       if (( ${#needs_apt[@]} > 0 )); then

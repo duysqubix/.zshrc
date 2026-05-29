@@ -691,3 +691,80 @@ _run_gauntlet_macos() {
   # And that same guard is interactive-only.
   echo "$output" | grep -q -- '-o interactive'
 }
+
+# ---------------------------------------------------------------------------
+# linux toolchain — cargo install bat/ripgrep needs a C linker (cc)
+# ---------------------------------------------------------------------------
+
+@test "linux: build-essential is queued when bat/ripgrep will be compiled and cc is missing" {
+  sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=linux zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD=''
+    apt-get(){ print -r -- 'CALL:apt-get '\"\$@\" >> \$HOME/calls.log; }
+    curl(){ return 0; }; cargo(){ :; }; git(){ :; }; sh(){ :; }; chmod(){ :; }
+    command_exists() { case \$1 in bat|rg|cc|fastfetch) return 1;; *) return 0;; esac }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  grep -E '^CALL:apt-get install .*build-essential' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "linux: build-essential is NOT queued when bat and ripgrep already exist" {
+  sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=linux zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD=''
+    apt-get(){ print -r -- 'CALL:apt-get '\"\$@\" >> \$HOME/calls.log; }
+    curl(){ return 0; }; cargo(){ :; }; git(){ :; }; sh(){ :; }; chmod(){ :; }
+    command_exists() { case \$1 in fzf) return 1;; *) return 0;; esac }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  ! grep -F 'build-essential' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+# ---------------------------------------------------------------------------
+# update_zshrc — must not clobber a symlinked ~/.zshrc; pull the repo instead
+# ---------------------------------------------------------------------------
+
+@test "update_zshrc: symlinked-to-repo git-pulls and keeps the symlink (no curl clobber)" {
+  sandbox=$(mktemp -d)
+  mkdir -p "$sandbox/repo"
+  printf 'rc-content\n' > "$sandbox/repo/.zshrc"
+  ln -s "$sandbox/repo/.zshrc" "$sandbox/.zshrc"
+  HOME=$sandbox zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    git()  { print -r -- 'CALL:git '\"\$@\" >> \$HOME/calls.log; return 0; }
+    curl() { print -r -- 'CALL:curl '\"\$@\" >> \$HOME/calls.log; return 0; }
+    update_zshrc 2>/dev/null
+  "
+  grep -E '^CALL:git .*pull' "$sandbox/calls.log"
+  ! grep -E '^CALL:curl .*-o' "$sandbox/calls.log"
+  [ -L "$sandbox/.zshrc" ]
+  rm -rf "$sandbox"
+}
+
+@test "update_zshrc: standalone (non-symlink) ~/.zshrc still curls the remote" {
+  sandbox=$(mktemp -d)
+  printf 'old\n' > "$sandbox/.zshrc"
+  HOME=$sandbox zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    git()  { print -r -- 'CALL:git '\"\$@\" >> \$HOME/calls.log; return 0; }
+    curl() {
+      local out=''
+      while (( \$# > 0 )); do [[ \$1 == -o ]] && { out=\$2; shift 2; continue; }; shift; done
+      [[ -n \$out ]] && print -rn -- 'remote-content' > \$out
+      print -r -- 'CALL:curl' >> \$HOME/calls.log
+      return 0
+    }
+    update_zshrc 2>/dev/null
+  "
+  grep -E '^CALL:curl' "$sandbox/calls.log"
+  ! grep -E '^CALL:git .*pull' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
