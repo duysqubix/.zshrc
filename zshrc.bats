@@ -675,3 +675,18 @@ _run_gauntlet_macos() {
   # the remote variable is defined as the repo's raw .zshrc url
   grep -qE '^_zshrc_remote_url=.*raw[.]githubusercontent[.]com/duysqubix/[.]zshrc' "$RC"
 }
+
+# ---------------------------------------------------------------------------
+# update-check gating — the remote update check runs only on a top-level
+# interactive shell (SHLVL=1), not in nested shells / tmux panes / subshells.
+# ---------------------------------------------------------------------------
+
+@test "update-check: zshrc_check_for_updates is gated on SHLVL=1 interactive" {
+  # No bare, ungated call on its own line.
+  ! grep -E '^[[:space:]]*zshrc_check_for_updates[[:space:]]*$' "$RC"
+  # The call is guarded together with the SHLVL=1 gate.
+  run grep -E 'SHLVL -eq 1.*zshrc_check_for_updates' "$RC"
+  [ "$status" -eq 0 ]
+  # And that same guard is interactive-only.
+  echo "$output" | grep -q -- '-o interactive'
+}

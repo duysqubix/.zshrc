@@ -504,7 +504,9 @@ run(){
     export HOMEBREW_NO_AUTO_UPDATE=1
   fi
 
-  zshrc_check_for_updates
+  # Only the top-level interactive shell checks the remote for updates; nested
+  # shells, tmux panes and subshells skip it (less startup work, no repeat noise).
+  [[ -o interactive && $SHLVL -eq 1 ]] && zshrc_check_for_updates
 
   _zshrc_install_gauntlet
 
