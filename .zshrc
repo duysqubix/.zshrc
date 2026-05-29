@@ -179,7 +179,7 @@ update_zshrc() {
   zlog debug "Updating .zshrc from remote"
   curl -s $_zshrc_gist_url -o $HOME/.zshrc \
     || panic "Unable to read remote .zshrc file in gist"
-  local _fetch_hash=$(sha256sum < $HOME/.zshrc | awk '{print $1}')
+  local _fetch_hash=$(_zshrc_sha256 < $HOME/.zshrc)
   print -r -- $_fetch_hash > $HOME/.zshrc-hash-remote
   print -r -- $_fetch_hash > $HOME/.zshrc-hash
   # Force the install gauntlet to re-run on next shell start.
@@ -205,8 +205,8 @@ zshrc_check_for_updates(){
 
   # Check for .zshrc updates
   zlog debug "Fetching remote .zshrc hash"
-  local remote_hash=$(curl -s $_zshrc_gist_url | sha256sum | awk '{print $1}')
-  local local_hash=$(cat $HOME/.zshrc | sha256sum | awk '{print $1}')
+  local remote_hash=$(curl -s $_zshrc_gist_url | _zshrc_sha256)
+  local local_hash=$(_zshrc_sha256 < $HOME/.zshrc)
 
   if [[ $local_hash != $remote_hash ]]; then
     zlog warn "Local '${RED}.zshrc${RESET}' out of sync with remote"
@@ -223,8 +223,36 @@ command_exists() {
   command -v "$1" > /dev/null 2>&1
 }
 
+# Portable SHA-256 of stdin: prints the lowercase hex digest only. Linux ships
+# sha256sum (GNU coreutils); macOS ships shasum -a 256 instead. Both emit the
+# same hex, only the binary name differs.
+_zshrc_sha256() {
+  if command_exists sha256sum; then
+    sha256sum | awk '{print $1}'
+  elif command_exists shasum; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    panic "no sha256sum or shasum available for hashing"
+  fi
+}
+
 directory_exists() {
   [[ -d "$1" ]]
+}
+
+# OS-detection seam. Honors the ZSHRC_OS env override first (so the bats suite
+# can force a branch inside the Linux container), otherwise derives the OS from
+# $OSTYPE: darwin* -> macos, anything else -> linux. Every cross-platform branch
+# in this rc dispatches on this single function.
+_zshrc_os() {
+  if [[ -n ${ZSHRC_OS:-} ]]; then
+    print -r -- "$ZSHRC_OS"
+    return 0
+  fi
+  case ${OSTYPE:-} in
+    darwin*) print -r -- macos ;;
+    *)       print -r -- linux ;;
+  esac
 }
 
 # Daily-rebuild idiom: full compinit when .zcompdump is missing or > 24h old,
@@ -251,39 +279,87 @@ _zshrc_install_gauntlet() {
   fi
   zlog debug "Running install gauntlet"
 
-  # Warn (don't panic) if sudo will need a password later — the real apt-get
-  # calls below will prompt the user. Keeps gauntlet usable on machines
-  # without NOPASSWD sudo configured.
-  if [[ -n $SUDO_CMD ]]; then
+  # Warn (don't panic) if sudo will need a password later — the apt-get calls
+  # below will prompt the user. Linux-only: macOS Homebrew never needs sudo, so
+  # a sudo probe there would be pointless (and would prompt unnecessarily).
+  if [[ -n $SUDO_CMD ]] && [[ "$(_zshrc_os)" == linux ]]; then
     sudo -n true 2>/dev/null || zlog warn "sudo will prompt for password during install steps"
   fi
 
-  # Collect all missing apt packages and install in one batched apt-get call
-  # at the end of this section (one update + one install instead of N).
-  local -a needs_apt
-  needs_apt=()
+  local _os="$(_zshrc_os)"
 
-  zlog debug "Checking required commands..."
-  typeset -A required_commands=( [git]=git [wget]=wget [ps]=procps [neofetch]=neofetch )
-  for cmd in ${(k)required_commands}; do
-    if ! command -v "$cmd" > /dev/null 2>&1; then
-      zlog info "Missing command: ${RED}${cmd}${RESET}"
-      needs_apt+=$required_commands[$cmd]
-    fi
-  done
+  # Fail loud on an unrecognized OS (e.g. a typo'd ZSHRC_OS override) instead of
+  # silently skipping every install branch and still writing the bootstrap
+  # marker, which would falsely mark the machine as provisioned.
+  case "$_os" in
+    linux|macos) ;;
+    *) panic "unsupported OS '$_os' (check \$ZSHRC_OS / \$OSTYPE)" ;;
+  esac
 
-  if ! command_exists fzf; then
-    zlog debug "fzf missing, queuing for apt batch"
-    needs_apt+=fzf
-  fi
+  # Package install, dispatched by OS. Both branches batch into a single
+  # update + single install (one transaction instead of N).
+  case "$_os" in
+    linux)
+      # Collect all missing apt packages and install in one batched apt-get call.
+      local -a needs_apt
+      needs_apt=()
 
-  if (( ${#needs_apt[@]} > 0 )); then
-    zlog debug "Installing apt packages: ${needs_apt[*]}"
-    ${=SUDO_CMD} apt-get update -qq \
-      || panic "apt-get update failed"
-    ${=SUDO_CMD} apt-get install -y "${needs_apt[@]}" \
-      || panic "could not install apt packages: ${needs_apt[*]}"
-  fi
+      zlog debug "Checking required commands..."
+      typeset -A required_commands=( [git]=git [wget]=wget [ps]=procps [neofetch]=neofetch )
+      for cmd in ${(k)required_commands}; do
+        if ! command -v "$cmd" > /dev/null 2>&1; then
+          zlog info "Missing command: ${RED}${cmd}${RESET}"
+          needs_apt+=$required_commands[$cmd]
+        fi
+      done
+
+      if ! command_exists fzf; then
+        zlog debug "fzf missing, queuing for apt batch"
+        needs_apt+=fzf
+      fi
+
+      if (( ${#needs_apt[@]} > 0 )); then
+        zlog debug "Installing apt packages: ${needs_apt[*]}"
+        ${=SUDO_CMD} apt-get update -qq \
+          || panic "apt-get update failed"
+        ${=SUDO_CMD} apt-get install -y "${needs_apt[@]}" \
+          || panic "could not install apt packages: ${needs_apt[*]}"
+      fi
+      ;;
+    macos)
+      command_exists brew \
+        || panic "Homebrew is required on macOS — install it from https://brew.sh"
+
+      # Collect all missing formulae and install in one batched brew call. ps
+      # ships with macOS (no procps formula); bat/ripgrep/bat-extras/uv all have
+      # first-class formulae, so macOS skips the cargo/rustup/git-clone paths.
+      local -a needs_brew
+      needs_brew=()
+
+      zlog debug "Checking required commands..."
+      typeset -A required_commands=( [git]=git [wget]=wget [neofetch]=neofetch )
+      for cmd in ${(k)required_commands}; do
+        if ! command_exists "$cmd"; then
+          zlog info "Missing command: ${RED}${cmd}${RESET}"
+          needs_brew+=$required_commands[$cmd]
+        fi
+      done
+
+      command_exists fzf    || { zlog debug "fzf missing, queuing for brew batch";        needs_brew+=fzf; }
+      command_exists bat    || { zlog debug "bat missing, queuing for brew batch";        needs_brew+=bat; }
+      command_exists rg     || { zlog debug "ripgrep missing, queuing for brew batch";    needs_brew+=ripgrep; }
+      command_exists batman || { zlog debug "bat-extras missing, queuing for brew batch"; needs_brew+=bat-extras; }
+      command_exists uv     || { zlog debug "uv missing, queuing for brew batch";         needs_brew+=uv; }
+
+      if (( ${#needs_brew[@]} > 0 )); then
+        zlog debug "Installing brew formulae: ${needs_brew[*]}"
+        brew update -q \
+          || panic "brew update failed"
+        HOMEBREW_NO_AUTO_UPDATE=1 brew install "${needs_brew[@]}" \
+          || panic "could not install brew formulae: ${needs_brew[*]}"
+      fi
+      ;;
+  esac
 
   zlog debug "Checking Oh My Zsh installation"
   if ! [[ -d $HOME/.oh-my-zsh ]]; then
@@ -302,44 +378,53 @@ _zshrc_install_gauntlet() {
     fi
   fi
 
-  if ! command_exists cargo; then
-    zlog warn "cargo not installed. Installing latest rustup toolset"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh \
-      || panic "could not download rust installer file"
-    chmod +x /tmp/rustup.sh || panic "could not chmod rust installer file"
-    /tmp/rustup.sh -y --profile minimal || panic "Could not install Rust toolchain"
-    pathadd $HOME/.cargo/bin
-  fi
-  if ! command_exists bat; then
-    zlog "Compiling '${RED}bat${RESET}'..."
-    cargo install bat
-  fi
-  if ! command_exists rg; then
-    zlog "Compiling '${RED}ripgrep${RESET}'..."
-    cargo install ripgrep
-  fi
+  # Linux installs bat/ripgrep/bat-extras/uv from cargo/source/curl; macOS got
+  # them from the brew batch above, so this whole block is linux-only.
+  case "$_os" in
+    linux)
+      if ! command_exists cargo; then
+        zlog warn "cargo not installed. Installing latest rustup toolset"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o /tmp/rustup.sh \
+          || panic "could not download rust installer file"
+        chmod +x /tmp/rustup.sh || panic "could not chmod rust installer file"
+        /tmp/rustup.sh -y --profile minimal || panic "Could not install Rust toolchain"
+        pathadd $HOME/.cargo/bin
+      fi
+      if ! command_exists bat; then
+        zlog "Compiling '${RED}bat${RESET}'..."
+        cargo install bat
+      fi
+      if ! command_exists rg; then
+        zlog "Compiling '${RED}ripgrep${RESET}'..."
+        cargo install ripgrep
+      fi
 
-  zlog debug "Checking bat-extras installation"
-  if ! directory_exists $HOME/.repos/bat-extras; then
-    (mkdir -p $HOME/.repos && \
-      zlog "Installing bat-extras..." && \
-      git clone --depth=1 https://github.com/eth-p/bat-extras.git $HOME/.repos/bat-extras && \
-      pushd $HOME/.repos/bat-extras && \
-      ${=SUDO_CMD} ./build.sh --install --no-verify && \
-      eval "$(batman --export-env)" && \
-      eval "$(batpipe)" && \
-      popd
-    ) | zlog  || panic "Unable to install bat-extras"
-  fi
+      zlog debug "Checking bat-extras installation"
+      if ! directory_exists $HOME/.repos/bat-extras; then
+        (mkdir -p $HOME/.repos && \
+          zlog "Installing bat-extras..." && \
+          git clone --depth=1 https://github.com/eth-p/bat-extras.git $HOME/.repos/bat-extras && \
+          pushd $HOME/.repos/bat-extras && \
+          ${=SUDO_CMD} ./build.sh --install --no-verify && \
+          eval "$(batman --export-env)" && \
+          eval "$(batpipe)" && \
+          popd
+        ) | zlog  || panic "Unable to install bat-extras"
+      fi
 
-  zlog debug "Checking uv installation"
-  if ! command_exists uv; then
-    zlog "Installing uv..."
-    (curl -LsSf https://astral.sh/uv/install.sh | ${=SUDO_CMD} env UV_INSTALL_DIR="/usr/bin" sh) | zlog \
-      || panic "Unable to install UV"
-  else
-    zlog debug "UV already installed"
-  fi
+      zlog debug "Checking uv installation"
+      if ! command_exists uv; then
+        zlog "Installing uv..."
+        (curl -LsSf https://astral.sh/uv/install.sh | ${=SUDO_CMD} env UV_INSTALL_DIR="/usr/bin" sh) | zlog \
+          || panic "Unable to install UV"
+      else
+        zlog debug "UV already installed"
+      fi
+      ;;
+    macos)
+      : # bat, ripgrep, bat-extras, uv were installed via the brew batch above
+      ;;
+  esac
 
   touch $HOME/.zshrc-bootstrapped
 }
@@ -384,6 +469,18 @@ run(){
   else
     SUDO_CMD='sudo'
     zlog debug "Setting SUDO_CMD to 'sudo' (running as non-root with sudo available)"
+  fi
+
+  # On macOS, put Homebrew on PATH before anything else (and on every shell
+  # start, so brew-installed tools resolve). Apple Silicon uses /opt/homebrew,
+  # Intel uses /usr/local. Disable per-command auto-update for snappy startup.
+  if [[ "$(_zshrc_os)" == macos ]]; then
+    if [[ -x /opt/homebrew/bin/brew && ":$PATH:" != *":/opt/homebrew/bin:"* ]]; then
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -x /usr/local/bin/brew && ":$PATH:" != *":/usr/local/bin:"* ]]; then
+      eval "$(/usr/local/bin/brew shellenv)"
+    fi
+    export HOMEBREW_NO_AUTO_UPDATE=1
   fi
 
   zshrc_check_for_updates
@@ -437,7 +534,11 @@ run(){
   alias bcp="docker run --rm -it mcr.microsoft.com/mssql-tools /opt/mssql-tools/bin/bcp"
   alias lazydocker='docker run --rm -it -v /var/run/docker.sock:/var/run/docker.sock -v $PWD/.lazydocker/config:/.config/jesseduffield/lazydocker lazyteam/lazydocker'
   alias dclint='docker run -t --rm -v .:/app zavoloklom/dclint'
-  alias pbcopy='xclip -sel c'
+  # pbcopy is native on macOS; only alias it to xclip on Linux (X11). Aliasing
+  # it unconditionally would shadow and break the real macOS pbcopy.
+  if [[ "$(_zshrc_os)" == linux ]]; then
+    alias pbcopy='xclip -sel c'
+  fi
 
   # load local specific stuff, if it exists.
 

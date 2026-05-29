@@ -352,3 +352,258 @@ _run_gauntlet() {
   [ ! -f "$sandbox/.zshrc-bootstrapped" ]
   rm -rf "$sandbox"
 }
+
+# ---------------------------------------------------------------------------
+# mac1 — OS-detection seam _zshrc_os(): ZSHRC_OS env override, else $OSTYPE
+# ---------------------------------------------------------------------------
+
+@test "mac1: _zshrc_os returns linux by default in the Ubuntu container" {
+  run zsh -c "ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC; _zshrc_os"
+  [ "$status" -eq 0 ]
+  [ "$output" = "linux" ]
+}
+
+@test "mac1: ZSHRC_OS=macos overrides detection" {
+  run zsh -c "ZSH_TESTING=1; ZSH_LOG_LEVEL=error; ZSHRC_OS=macos; source $RC; _zshrc_os"
+  [ "$status" -eq 0 ]
+  [ "$output" = "macos" ]
+}
+
+@test "mac1: ZSHRC_OS=linux overrides detection" {
+  run zsh -c "ZSH_TESTING=1; ZSH_LOG_LEVEL=error; ZSHRC_OS=linux; source $RC; _zshrc_os"
+  [ "$status" -eq 0 ]
+  [ "$output" = "linux" ]
+}
+
+# ---------------------------------------------------------------------------
+# mac2 — portable _zshrc_sha256: sha256sum (linux) else shasum -a 256 (macos)
+# ---------------------------------------------------------------------------
+
+@test "mac2: _zshrc_sha256 produces correct sha256 hex via sha256sum path" {
+  run zsh -c "ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC; print -rn 'hello' | _zshrc_sha256"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" ]
+}
+
+@test "mac2: _zshrc_sha256 falls back to shasum -a 256 when sha256sum is absent" {
+  run zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    command_exists() { [[ \$1 == sha256sum ]] && return 1; return 0; }
+    shasum() { print -r -- 'fallbackhash  -'; }
+    print -rn 'whatever' | _zshrc_sha256
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "fallbackhash" ]
+}
+
+@test "mac2: hashing callers use _zshrc_sha256, not bare sha256sum" {
+  ! awk '/^update_zshrc\(\)/,/^}/' "$RC" | grep -q 'sha256sum'
+  ! awk '/^zshrc_check_for_updates\(\)/,/^}/' "$RC" | grep -q 'sha256sum'
+  awk '/^update_zshrc\(\)/,/^}/' "$RC" | grep -q '_zshrc_sha256'
+  awk '/^zshrc_check_for_updates\(\)/,/^}/' "$RC" | grep -q '_zshrc_sha256'
+}
+
+# ---------------------------------------------------------------------------
+# mac3 — pbcopy=xclip alias must be linux-only (native macOS pbcopy survives)
+# ---------------------------------------------------------------------------
+
+@test "mac3: pbcopy=xclip alias is gated behind a linux _zshrc_os guard" {
+  # Linux behavior preserved: the xclip alias is still present in the file.
+  run grep -F "alias pbcopy='xclip -sel c'" "$RC"
+  [ "$status" -eq 0 ]
+  # ...and it is wrapped in an OS guard naming linux within the 2 preceding lines.
+  local n ctx
+  n=$(grep -n "alias pbcopy='xclip" "$RC" | head -1 | cut -d: -f1)
+  ctx=$(sed -n "$((n-2)),${n}p" "$RC")
+  echo "ctx=[$ctx]"
+  echo "$ctx" | grep -q '_zshrc_os'
+  echo "$ctx" | grep -q 'linux'
+}
+
+# ---------------------------------------------------------------------------
+# mac4/5/6/8 — macOS install gauntlet via Homebrew (batched), uv via brew,
+# bat/ripgrep/bat-extras via brew, sudo precheck skipped on macOS.
+# ---------------------------------------------------------------------------
+
+# Run the gauntlet under a sandbox HOME forced to macOS, with all heavy
+# commands stubbed and logged to $sandbox/calls.log. $1 = brew_present
+# (yes/no), $2 = space-separated list of commands to treat as MISSING.
+_run_gauntlet_macos() {
+  local brew_present=${1:-yes}
+  local missing="${2:-}"
+  local sandbox; sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=macos zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error
+    source $RC
+    SUDO_CMD=''
+    brew()    { print -r -- 'CALL:brew '\"\$@\" >> \$HOME/calls.log; }
+    apt-get() { print -r -- 'CALL:apt-get '\"\$@\" >> \$HOME/calls.log; }
+    cargo()   { print -r -- 'CALL:cargo '\"\$@\" >> \$HOME/calls.log; }
+    git()     { print -r -- 'CALL:git '\"\$@\" >> \$HOME/calls.log; }
+    sh()      { print -r -- 'CALL:sh '\"\$@\" >> \$HOME/calls.log; }
+    chmod()   { print -r -- 'CALL:chmod '\"\$@\" >> \$HOME/calls.log; }
+    curl()    { print -r -- 'CALL:curl '\"\$@\" >> \$HOME/calls.log; return 0; }
+    sudo()    { print -r -- 'CALL:sudo '\"\$@\" >> \$HOME/calls.log; }
+    command_exists() {
+      [[ \$1 == brew ]] && { [[ '$brew_present' == yes ]] && return 0 || return 1; }
+      for _m in ${missing}; do [[ \$1 == \$_m ]] && return 1; done
+      return 0
+    }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  echo "$sandbox"
+}
+
+@test "mac4: macos gauntlet runs one brew update + one batched brew install" {
+  sandbox=$(_run_gauntlet_macos yes "fzf")
+  echo "calls:"; cat "$sandbox/calls.log" 2>/dev/null || true
+  upd=$(grep -c '^CALL:brew update' "$sandbox/calls.log" || true)
+  inst=$(grep -c '^CALL:brew install' "$sandbox/calls.log" || true)
+  [ "$upd" -le 1 ]
+  [ "$inst" -eq 1 ]
+  rm -rf "$sandbox"
+}
+
+@test "mac4: missing fzf is installed via the batched brew install" {
+  sandbox=$(_run_gauntlet_macos yes "fzf")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" fzf "* || " $line " == *" fzf" ]]
+  rm -rf "$sandbox"
+}
+
+@test "mac4: no apt-get calls on the macos branch" {
+  sandbox=$(_run_gauntlet_macos yes "fzf")
+  [ ! -f "$sandbox/calls.log" ] || ! grep -q '^CALL:apt-get' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac4: procps is never requested via brew on macos (ps ships natively)" {
+  sandbox=$(_run_gauntlet_macos yes "fzf")
+  ! grep -F 'procps' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac4: missing Homebrew on macos triggers a panic" {
+  run zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; ZSHRC_OS=macos; source $RC
+    SUDO_CMD=''
+    command_exists() { [[ \$1 == brew ]] && return 1; return 0; }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh 2>/dev/null
+    _zshrc_install_gauntlet
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Homebrew"* ]]
+}
+
+@test "mac5: macos installs uv via the brew batch, not the /usr/bin curl installer" {
+  sandbox=$(_run_gauntlet_macos yes "uv")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" uv "* || " $line " == *" uv" ]]
+  ! grep -q 'UV_INSTALL_DIR' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac5: linux uv install still pins UV_INSTALL_DIR=/usr/bin via sudo" {
+  awk '/^_zshrc_install_gauntlet\(\)/,/^}/' "$RC" | grep -q 'UV_INSTALL_DIR="/usr/bin"'
+}
+
+@test "mac6: macos prefers brew for bat (no cargo install bat)" {
+  sandbox=$(_run_gauntlet_macos yes "bat")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" bat "* || " $line " == *" bat" ]]
+  ! grep -E '^CALL:cargo install bat' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac6: macos prefers brew for ripgrep (no cargo install ripgrep)" {
+  sandbox=$(_run_gauntlet_macos yes "rg")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" ripgrep "* || " $line " == *" ripgrep" ]]
+  ! grep -E '^CALL:cargo install ripgrep' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac6: macos uses brew bat-extras, never git-clones it" {
+  sandbox=$(_run_gauntlet_macos yes "batman")
+  line=$(grep '^CALL:brew install' "$sandbox/calls.log")
+  [[ " $line " == *" bat-extras "* || " $line " == *" bat-extras" ]]
+  ! grep -E '^CALL:git .*bat-extras' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac6: linux still uses cargo for bat/ripgrep, never brew" {
+  sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=linux zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD=''
+    apt-get(){ :; }
+    cargo(){ print -r -- 'CALL:cargo '\"\$@\" >> \$HOME/calls.log; }
+    brew(){  print -r -- 'CALL:brew '\"\$@\" >> \$HOME/calls.log; }
+    curl(){ return 0; }; sh(){ :; }; git(){ :; }; chmod(){ :; }
+    command_exists() { case \$1 in bat|rg) return 1;; *) return 0;; esac }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  grep -E '^CALL:cargo install bat' "$sandbox/calls.log"
+  grep -E '^CALL:cargo install ripgrep' "$sandbox/calls.log"
+  [ ! -f "$sandbox/calls.log" ] || ! grep -q '^CALL:brew' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+@test "mac8: macos branch skips the sudo -n true precheck" {
+  sandbox=$(mktemp -d)
+  HOME=$sandbox ZSHRC_OS=macos zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD='sudo'
+    sudo(){ print -r -- 'CALL:sudo '\"\$@\" >> \$HOME/calls.log; }
+    brew(){ :; }
+    command_exists() { return 0; }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  [ ! -f "$sandbox/calls.log" ] || ! grep -q '^CALL:sudo -n true' "$sandbox/calls.log"
+  rm -rf "$sandbox"
+}
+
+# ---------------------------------------------------------------------------
+# mac7 — run() puts Homebrew on PATH (prefix-detected) on macOS
+# ---------------------------------------------------------------------------
+
+@test "mac7: run() initializes Homebrew shellenv on macOS with prefix detection" {
+  run grep -F 'brew shellenv' "$RC"
+  [ "$status" -eq 0 ]
+  # Both Apple Silicon and Intel prefixes are probed.
+  grep -q '/opt/homebrew/bin/brew' "$RC"
+  grep -q '/usr/local/bin/brew' "$RC"
+  # The shellenv init is gated on macos (guard within 6 preceding lines).
+  local n ctx
+  n=$(grep -n 'brew shellenv' "$RC" | head -1 | cut -d: -f1)
+  ctx=$(sed -n "$((n-6)),${n}p" "$RC")
+  echo "ctx=[$ctx]"
+  echo "$ctx" | grep -q 'macos'
+}
+
+# ---------------------------------------------------------------------------
+# mac9 — unrecognized OS must panic, not silently mark bootstrap done
+# ---------------------------------------------------------------------------
+
+@test "mac9: unsupported ZSHRC_OS panics and does not write the bootstrap marker" {
+  sandbox=$(mktemp -d)
+  run env HOME="$sandbox" ZSHRC_OS=freebsd zsh -c "
+    ZSH_TESTING=1; ZSH_LOG_LEVEL=error; source $RC
+    SUDO_CMD=''
+    command_exists() { return 0; }
+    directory_exists() { return 0; }
+    mkdir -p \$HOME/.oh-my-zsh
+    _zshrc_install_gauntlet
+  "
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported"* ]]
+  [ ! -f "$sandbox/.zshrc-bootstrapped" ]
+  rm -rf "$sandbox"
+}
